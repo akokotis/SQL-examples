@@ -1,0 +1,166 @@
+drop table "AK_SEARCH_FRONT_PAGE";
+create table "AK_SEARCH_FRONT_PAGE" as(
+  
+with global_vars as (
+select
+20191229 as start_date,
+20200308 as end_date,
+'2019-12-29 00:00:00.000' as start_datetime,
+'2020-03-08 00:00:00.000' as end_datetime
+)
+
+,sessions as (
+select
+session_key,
+session_search_date_key,
+page_template as search_type,
+--case when page_template='nav_search' then NAVIGATION_SEARCH_TERM
+  --else USER_SEARCH_TERM end as search_term,
+NAVIGATION_SEARCH_TERM as search_term,
+PAGE_NAME_KEY,
+count(distinct CLICKSTREAM_VISIT_PAGE_NUM) as count_times,
+min(CLICKSTREAM_VISIT_PAGE_NUM) as first_time
+
+from "SESSION_SEARCH" 
+where SESSION_SEARCH_DATE_KEY between (select start_date from global_vars) and (select end_date from global_vars)
+and SEARCH_REFINEMENT_TYPE=''
+and SEARCH_PAGE_NUM=1
+--and NAVIGATION_CATEGORY_TYPE in ('cat','query')
+and NAVIGATION_CATEGORY_TYPE in ('cat')
+and page_template='nav_search'
+and USER_SEARCH_RESULTS_RETURNED_COUNT>0
+group by 1,2,3,4,5
+)
+
+  
+, slots as (
+select a.session_key
+    , clickstream_visit_page_num
+    ,SESSION_PAGEVIEW_DATE_KEY
+    ,SESSION_PAGEVIEW_DATE
+    ,a.PAGE_NAME_KEY
+  ,search_type
+  ,search_term
+    , substr(cast(SPLIT(B.VALUE,';') as varchar(50)),6,6) as product
+--    , row_number() over(partition by a.session_key, clickstream_visit_page_num,SESSION_PAGEVIEW_DATE_KEY,SESSION_PAGEVIEW_DATE,a.PAGE_NAME_KEY,search_type,search_term order by regexp_instr(product_list,substr(cast(SPLIT(B.VALUE,';') as varchar(50)),6,6))) as search_slot_number
+    , b.index+1 as search_slot_number
+  from session_pageview A
+inner join sessions c on a.session_key=c.session_key and a.clickstream_visit_page_num=c.first_time and a.SESSION_PAGEVIEW_DATE_KEY=c.session_search_date_key and a.PAGE_NAME_KEY=c.PAGE_NAME_KEY
+        ,LATERAL FLATTEN(INPUT=>(split(product_list,','))) B
+where session_start_date_key between (select start_date from global_vars) and (select end_date from global_vars)
+)
+
+
+,price_type as (
+select
+r.SESSION_PAGEVIEW_DATE,
+r.SESSION_PAGEVIEW_DATE_KEY,
+r.PRODUCT,
+sk.sku,
+sk.SKU_STATUS_DESC,	
+sq.CURRENT_CORP_PRICE,
+case when substr(cast(sq.CURRENT_CORP_PRICE as varchar(17)), length(cast(sq.CURRENT_CORP_PRICE as varchar(17))), 1)='9' then 'Sale'
+	when substr(cast(sq.CURRENT_CORP_PRICE as varchar(17)), length(cast(sq.CURRENT_CORP_PRICE as varchar(17)))-1, 2)='93' then 'Clearance'
+	when substr(cast(sq.CURRENT_CORP_PRICE as varchar(17)), length(cast(sq.CURRENT_CORP_PRICE as varchar(17)))-1, 2)='83' then 'Super Clearance'
+	when substr(cast(sq.CURRENT_CORP_PRICE as varchar(17)), length(cast(sq.CURRENT_CORP_PRICE as varchar(17)))-1, 2)='73' then 'Outlet'
+	else 'Regular' end as PRICE_TYPE,
+sq.EFF_START_DATETIME,
+sq.EFF_END_DATETIME
+from
+slots r
+inner join (select distinct product, Sku, SKU_STATUS_DESC from MERCH_SKU) sk on sk.product=r.product
+inner join (select * from "SKU_PRICE" where EFF_END_DATETIME>= (select start_datetime from global_vars)) sq on sk.sku=sq.sku and r.SESSION_PAGEVIEW_DATE between sq.EFF_START_DATETIME and sq.EFF_END_DATETIME
+where search_slot_number<=30
+
+)
+  
+  
+,price_type_rollup as (
+select
+SESSION_PAGEVIEW_DATE,
+SESSION_PAGEVIEW_DATE_KEY,
+PRODUCT,
+min(CURRENT_CORP_PRICE) as min_sku_price,
+max(CURRENT_CORP_PRICE) as max_sku_price,
+avg(CURRENT_CORP_PRICE) as avg_sku_price,
+count(distinct sku) as total_sku,
+count(distinct case when PRICE_TYPE='Sale' then sku end) as sale_sku,
+count(distinct case when PRICE_TYPE='Super Clearance' then sku end) as super_clearance_sku,
+count(distinct case when PRICE_TYPE='Clearance' then sku end) as clearance_sku,
+count(distinct case when PRICE_TYPE='Regular' then sku end) as regular_sku,
+count(distinct case when PRICE_TYPE='Outlet' then sku end) as outlet_sku
+from
+price_type
+group by 1,2,3
+)
+
+,demand as (
+select distinct
+PRODUCT, 
+SESSION_CHECKOUT_DATE_KEY, 
+count(distinct session_key) as sessions_convert
+from
+"SESSION_CHECKOUT"
+where 1=1
+and SESSION_CHECKOUT_DATE_KEY between (select start_date from global_vars) and (select end_date from global_vars)
+and order_id is not null
+group by 1,2
+)
+
+,ctr as (
+select distinct
+PRODUCT, 
+SESSION_PAGEVIEW_DATE_KEY, 
+count(distinct session_key) as sessions_pdp
+from
+SESSION_PAGEVIEW
+where 1=1
+and SESSION_PAGEVIEW_DATE_KEY between (select start_date from global_vars) and (select end_date from global_vars)
+group by 1,2
+)
+
+
+
+
+select
+d.FISCAL_WEEK,  
+d.FISCAL_MONTH, 
+a.search_type,
+a.search_term,
+a.product,
+a.search_slot_number,
+ case when a.SEARCH_SLOT_NUMBER in (1,2,3) then 1
+	when a.SEARCH_SLOT_NUMBER in (4,5,6) then 2
+	when a.SEARCH_SLOT_NUMBER in (7,8,9) then 3
+	when a.SEARCH_SLOT_NUMBER in (10,11,12) then 4
+	when a.SEARCH_SLOT_NUMBER in (13,14,15) then 5
+	when a.SEARCH_SLOT_NUMBER in (16,17,18) then 6
+	when a.SEARCH_SLOT_NUMBER in (19,20,21) then 7
+	when a.SEARCH_SLOT_NUMBER in (22,23,24) then 8
+	when a.SEARCH_SLOT_NUMBER in (25,26,27) then 9
+	when a.SEARCH_SLOT_NUMBER in (28,29,30) then 10 end as row_id,
+case when a.SEARCH_SLOT_NUMBER in (1,4,7,10,13,16,19,22,25,28) then 1
+	when a.SEARCH_SLOT_NUMBER in (2,5,8,11,14,17,20,23,26,29) then 2
+	when a.SEARCH_SLOT_NUMBER in (3,6,9,12,15,18,21,24,27,30) then 3 end as column_id,
+min_sku_price,
+max_sku_price,
+avg_sku_price,
+total_sku,
+sale_sku,
+super_clearance_sku,
+clearance_sku,
+regular_sku,
+outlet_sku,
+count(distinct a.session_key) as searches,
+sum(coalesce(t.sessions_pdp,0)) as sessions_pdp,
+sum(coalesce(m.sessions_convert,0)) as sessions_convert
+from slots a
+inner join CALENDAR d on a.SESSION_PAGEVIEW_DATE_KEY=d.Date_key
+inner join  price_type_rollup pt on  pt.SESSION_PAGEVIEW_DATE_KEY=a.SESSION_PAGEVIEW_DATE_KEY and pt.PRODUCT=a.PRODUCT
+left join ctr t on t.product=a.product and a.SESSION_PAGEVIEW_DATE_KEY=t.SESSION_PAGEVIEW_DATE_KEY
+left join demand m on a.product=m.product and a.SESSION_PAGEVIEW_DATE_KEY=m.SESSION_CHECKOUT_DATE_KEY
+where search_slot_number<=30
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+) 
+
+
